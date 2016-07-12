@@ -141,20 +141,6 @@ class ProcessChats extends java.io.Serializable {
           }
         }
       }
-    
-      import java.text.SimpleDateFormat;
-      val formatter: SimpleDateFormat = new SimpleDateFormat("M-d-yy");    
-      val currentDate: String = formatter.format(new java.util.Date());    
-      //println("Today is " + currentDate)
-      val endDiff = findDifference(toDay, currentDate)
-      //println("EndDiff is " + endDiff)
-      if(endDiff > maxDays) {
-        maxDays = endDiff
-        fromDay = toDay
-        toDay = currentDate
-        //println("maxDays is " + maxDays)
-      }
-    
       return (maxDays, fromDay, toDay)
     }
     
@@ -217,7 +203,7 @@ class ProcessChats extends java.io.Serializable {
       case _ => INFO_UNAVAILABLE
     }
   
-  def calculateStats(chatRDD:org.apache.spark.rdd.RDD[ChatContent], isGroup: Boolean, statType: String) {
+  def calculateStats(chatRDD:org.apache.spark.rdd.RDD[ChatContent], isGroup: Boolean, statType: String, limitedStats: Integer) {
     
       def isCombined: Boolean = statType=="combined"
       println("\nSender Stats: (sender : number of chats)")
@@ -277,14 +263,15 @@ class ProcessChats extends java.io.Serializable {
       })
       
       /* Common Stats */
-      var infoString: String = loadInfoString(isGroup, statType, "longest")
-      val longestStreakDays = this.findConsecutiveStreak(chatRDD.filter(filterOutChatContent).map(each=>(each.date)).collect())
-      println(infoString + longestStreakDays._1 + " days from " + longestStreakDays._2 + " to " + longestStreakDays._3)
+      if(limitedStats == -1) {
+        var infoString: String = loadInfoString(isGroup, statType, "longest")
+        val longestStreakDays = this.findConsecutiveStreak(chatRDD.filter(filterOutChatContent).map(each=>(each.date)).collect())
+        println(infoString + longestStreakDays._1 + " days from " + longestStreakDays._2 + " to " + longestStreakDays._3)
     
-      infoString = loadInfoString(isGroup, statType, "silent")
-      val silentDays = this.silentDays(chatRDD.filter(filterOutChatContent).map(each=>(each.date)).collect())
-      println(infoString + silentDays._1 + " days from " + silentDays._2 + " to " + silentDays._3 + ".")
-      
+        infoString = loadInfoString(isGroup, statType, "silent")
+        val silentDays = this.silentDays(chatRDD.filter(filterOutChatContent).map(each=>(each.date)).collect())
+        println(infoString + silentDays._1 + " days from " + silentDays._2 + " to " + silentDays._3 + ".")
+      }
   }
   
   def mainRun(filePath:String, isGroup:Boolean) {
@@ -292,16 +279,21 @@ class ProcessChats extends java.io.Serializable {
     val chatRDD = sc.parallelize(allChats)
     println("\nALL STATS \n=====================")
     var statType = "combined"
-    this.calculateStats(chatRDD, isGroup, statType)
+    var limitedStats = -1
+    this.calculateStats(chatRDD, isGroup, statType, limitedStats)
     println("\n=========================")
     /* Individual Stats */
     println("\nINDIVIDUAL STATS \n==========================")
     val senderList = chatRDD.filter(filterOutChatContent).map(each=>(each.sender)).distinct.collect().sorted
     statType = "individual"
     for(sender <- senderList) {
+      limitedStats = -1
       println("Stats of " + sender + "\n=======================")
+      if(sender=="Whatsapp Notification") {
+        limitedStats = 1
+      }
       val senderRDD = chatRDD.filter(_.sender==sender)
-      this.calculateStats(senderRDD, isGroup, statType)
+      this.calculateStats(senderRDD, isGroup, statType, limitedStats)
       println("\n=========================")
     }
   }
