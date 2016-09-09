@@ -1,13 +1,34 @@
+package analysis
+import org.apache.spark.sql.SparkSession
+import org.apache.spark.SparkContext
+import scala.io.Source
+
+object ProcessChats {
+  def main(args: Array[String]) {
+    val sc = SparkSession
+      .builder
+      .appName("Analytics")
+      .getOrCreate()
+    val file  = if (args.length > 0) args(0) else ""
+    val isGroup  = if (args.length > 1) args(1).toBoolean else false
+    new ProcessChats().mainRun(file, isGroup, sc) 
+    sc.stop()
+  }
+}
+
+
 class ChatContent(val date:String, val time:String, val sender:String, var chatText:String) extends java.io.Serializable {
     def this(specialChat: String) = this(specialChat, specialChat, specialChat, specialChat)
     def appendToChatContent(chatFragment: String) {
       chatText = chatText.concat("\n").concat(chatFragment)
     }
-  }
+}
+
 class ProcessChats extends java.io.Serializable {
   val MEDIA_CONSTANT = "<Media omitted>"
   val WHATSAPP_NOTIFICATION = "Whatsapp Notification"
-  val LIST_OF_ADULT_WORDS: List[String] = List("fuck", "fucking", "sex", "boobs", "dick", "pussy", "ass")
+  //Wordlist obtained from http://www.searchdaimon.com/wiki/Adult_words_list_basic
+  val LIST_OF_ADULT_WORDS: List[String] = Source.fromFile("../resources/rated_words.txt").getLines.toList
   val LIST_OF_FILTERED_WORDS: List[String] = List("<Media", "omitted>", "previous___chat", "")
   val DATE_LIMIT = 5
   val TIME_LIMIT = 5
@@ -79,8 +100,8 @@ class ProcessChats extends java.io.Serializable {
     return this.divideContent(line)
   }
   
-  def processChats(filePath: String): List[ChatContent] = {
-    val baseFile = sc.textFile(filePath)
+  def processChats(filePath: String, sc: SparkSession): List[ChatContent] = {
+    val baseFile = sc.sparkContext.textFile(filePath)
     val allLines = baseFile.map(eachLine => eachLine).cache().collect()
     var allChats = List(new ChatContent("previous___chat"))
     for(line <- allLines) {
@@ -203,98 +224,120 @@ class ProcessChats extends java.io.Serializable {
       case _ => INFO_UNAVAILABLE
     }
   
-  def calculateStats(chatRDD:org.apache.spark.rdd.RDD[ChatContent], isGroup: Boolean, statType: String, limitedStats: Integer) {
-    
+  def calculateStats(chatRDD:org.apache.spark.rdd.RDD[ChatContent], isGroup: Boolean, statType: String, limitedStats: Integer, outputDirectory:String, printWriter:java.io.PrintWriter) {
       def isCombined: Boolean = statType=="combined"
-      println("\nSender Stats: (sender : number of chats)")
+      writeToFile("\n\nSender Stats: (sender : number of chats)\n", printWriter)
       val senderStats = chatRDD.filter(filterOutChatContent).map(each=>(each.sender,1)).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) SENDER_LIMIT
         else SENDER_LIMIT_INDIVIDUAL
-      }).foreach(println)
+      })
     
-      println("\nMedia Stats: Number of media files sent")
+      writeToFile(senderStats.mkString("\n") + "\n", printWriter)
+
+      writeToFile("\n\nMedia Stats: Number of media files sent\n", printWriter)
       val mediaStats = chatRDD.filter(_.chatText==MEDIA_CONSTANT).count()
-      println(mediaStats)
+      writeToFile(mediaStats.toString(), printWriter)
     
-      println("\nDate Stats: (date : number of chats)")
+      writeToFile("\n\nDate Stats: (date : number of chats)\n", printWriter)
       val dateStats = chatRDD.map(each=>(each.date,1)).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) DATE_LIMIT
         else DATE_LIMIT_INDIVIDUAL
-      }).foreach(println)
+      })
+      writeToFile(dateStats.mkString("\n"), printWriter)
       
-      println("\nTime Stats: (time : number of chats)")
+      writeToFile("\n\nTime Stats: (time : number of chats)\n", printWriter)
       val timeStats = chatRDD.map(each=>(each.time,1)).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) TIME_LIMIT
         else TIME_LIMIT_INDIVIDUAL
-      }).foreach(println)
+      })
+      writeToFile(timeStats.mkString("\n"), printWriter)
     
-      println("\nText Stats: (text : number of times sent)")
+      writeToFile("\n\nText Stats: (text : number of times sent)\n", printWriter)
       val chatTextStats = chatRDD.filter(_.chatText!=MEDIA_CONSTANT).map(each=>(each.chatText,1)).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) CHAT_LIMIT
         else CHAT_LIMIT_INDIVIDUAL
-      }).foreach(println)
-    
-      println("\nWord Stats: (word:number of times sent)")
+      })
+      writeToFile(chatTextStats.mkString("\n"), printWriter)
+
+      writeToFile("\n\nWord Stats: (word:number of times sent)\n", printWriter)
       val allWordsStats = chatRDD.flatMap(each=>each.chatText.split(" ")).filter(filterOutWords).map(word=>(word,1)).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) WORD_LIMIT
         else WORD_LIMIT_INDIVIDUAL
-      }).foreach(println)
-    
-      println("\nLong Word Stats: (word:number of times sent)")
+      })
+      writeToFile(allWordsStats.mkString("\n"), printWriter)
+
+      writeToFile("\n\nLong Word Stats: (word:number of times sent)\n", printWriter)
       val longWordsStats = chatRDD.flatMap(each=>each.chatText.split(" ")).filter(filterOutWords).map(checkLongWords).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) LONG_WORD_LIMIT
         else LONG_WORD_LIMIT_INDIVIDUAL
-      }).foreach(println)
+      })
+      writeToFile(longWordsStats.mkString("\n"), printWriter)
     
-      println("\nAdult Word Stats: (word:number of times sent)")
+      writeToFile("\n\nAdult Word Stats: (word:number of times sent)", printWriter)
       val fWordStats = chatRDD.flatMap(each=>each.chatText.split(" ")).map(checkWords).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) ADULT_WORD_LIMIT
         else ADULT_WORD_LIMIT_INDIVIDUAL
-      }).foreach((a) => {
-          if(a._2>0) println(a)
       })
+      for(a <- fWordStats 
+	  if a._2>0) {
+              writeToFile("\n" + "(" + a._1 + ", " + a._2.toString() + ")", printWriter)
+      }
       
-      println("\nSmiley Stats: (smiley:number of times sent)")
+      
+      writeToFile("\n\nSmiley Stats: (smiley:number of times sent)", printWriter)
       val smileyStats = chatRDD.flatMap(each=>each.chatText.split(" ")).map(checkSmileys).reduceByKey(_+_).collect().sortWith(_._2 > _._2).take({
         if(isCombined) SMILEY_LIMIT
         else SMILEY_LIMIT_INDIVIDUAL
-      }).foreach((a) => {
-          if(a._2>0) println(a)
       })
+      for(a <- smileyStats 
+	  if a._2>0) {
+              writeToFile("\n" + "(" + a._1 + ", " + a._2.toString() + ")", printWriter)
+      }
       
       /* Common Stats */
       if(limitedStats == -1) {
         var infoString: String = loadInfoString(isGroup, statType, "longest")
         val longestStreakDays = this.findConsecutiveStreak(chatRDD.filter(filterOutChatContent).map(each=>(each.date)).collect())
-        println(infoString + longestStreakDays._1 + " days from " + longestStreakDays._2 + " to " + longestStreakDays._3)
+        writeToFile("\n" +infoString + longestStreakDays._1 + " days from " + longestStreakDays._2 + " to " + longestStreakDays._3, printWriter)
     
         infoString = loadInfoString(isGroup, statType, "silent")
         val silentDays = this.silentDays(chatRDD.filter(filterOutChatContent).map(each=>(each.date)).collect())
-        println(infoString + silentDays._1 + " days from " + silentDays._2 + " to " + silentDays._3 + ".")
+        writeToFile("\n" + infoString + silentDays._1 + " days from " + silentDays._2 + " to " + silentDays._3 + ".", printWriter)
       }
   }
+
+
+  def writeToFile(content: String, printWriter: java.io.PrintWriter) = {
+    import java.io._
+    printWriter.append(content)
+  }
   
-  def mainRun(filePath:String, isGroup:Boolean) {
-    val allChats = this.processChats(filePath)
-    val chatRDD = sc.parallelize(allChats)
-    println("\nALL STATS \n=====================")
+  def mainRun(filePath:String, isGroup:Boolean, sc:SparkSession) {
+    import java.io._ 
+    println("File is " + filePath)
+    val outputFile = (filePath + "_output.txt")
+    val printWriter = new PrintWriter(new OutputStreamWriter(new FileOutputStream(new File(outputFile), true), "UTF-8"))
+    val allChats = this.processChats(filePath, sc)
+    val chatRDD = sc.sparkContext.parallelize(allChats)
+    writeToFile("\nALL STATS \n=====================", printWriter)
     var statType = "combined"
     var limitedStats = -1
-    this.calculateStats(chatRDD, isGroup, statType, limitedStats)
-    println("\n=========================")
+    this.calculateStats(chatRDD, isGroup, statType, limitedStats, outputFile, printWriter)
+    writeToFile("\n=========================", printWriter)
     /* Individual Stats */
-    println("\nINDIVIDUAL STATS \n==========================")
+    writeToFile("\nINDIVIDUAL STATS \n==========================\n", printWriter)
     val senderList = chatRDD.filter(filterOutChatContent).map(each=>(each.sender)).distinct.collect().sorted
     statType = "individual"
     for(sender <- senderList) {
       limitedStats = -1
-      println("Stats of " + sender + "\n=======================")
+      writeToFile("Stats of " + sender + "\n=======================", printWriter)
       if(sender=="Whatsapp Notification") {
         limitedStats = 1
       }
       val senderRDD = chatRDD.filter(_.sender==sender)
-      this.calculateStats(senderRDD, isGroup, statType, limitedStats)
-      println("\n=========================")
+      this.calculateStats(senderRDD, isGroup, statType, limitedStats, outputFile, printWriter)
+      writeToFile("\n=========================\n", printWriter)
     }
+    printWriter.close
   }
 }
